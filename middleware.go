@@ -9,9 +9,9 @@ import (
 )
 
 var (
-	_            http.Handler     = &httpRateLimiterHandler{}
-	_            Extractor        = &httpHeaderExtractor{}
-	stateStrings map[State]string = map[State]string{
+	_            *httpRateLimiterHandler = &httpRateLimiterHandler{}
+	_            Extractor               = &httpHeaderExtractor{}
+	stateStrings map[State]string        = map[State]string{
 		Allow: "Allow",
 		Deny:  "Deny",
 	}
@@ -68,18 +68,16 @@ type RateLimiterConfig struct {
 }
 
 type httpRateLimiterHandler struct {
-	handler http.Handler
-	config  *RateLimiterConfig
+	config *RateLimiterConfig
 }
 
 // NewHTTPRateLimiterHandler wraps an existing http.Handler object performing rate limiting before
 // sending the request to the wrapped handler. If any errors happen while trying to rate limit a request
 // or if the request is denied, the rate limiting handler will send a response to the client and will not
 // call the wrapped handler.
-func NewHTTPRateLimiterHandler(originalHandler http.Handler, config *RateLimiterConfig) http.Handler {
+func NewHTTPRateLimiterHandler(config *RateLimiterConfig) *httpRateLimiterHandler {
 	return &httpRateLimiterHandler{
-		handler: originalHandler,
-		config:  config,
+		config: config,
 	}
 }
 
@@ -91,42 +89,45 @@ func (h *httpRateLimiterHandler) writeResponse(writer http.ResponseWriter, statu
 	}
 }
 
-// ServeHTTP performs rate limiting with the configuration it was provided with and
-// if there were not errors and the request was allowed it is send to the wrapped handler.
+// `RateLimitingMiddleware` is the middleware which performs rate limiting with the configuration it was provided with and
+// if there were no errors and the request was allowed it is send to the wrapped handler.
 // It also adds rate limiting headers that will be sent to the client to make it aware of what state
 // it is in terms of rate limiting.
-func (h *httpRateLimiterHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	key, err := h.config.Extractor.Extract(request)
-	if err != nil {
-		h.writeResponse(writer, http.StatusBadRequest, "failed to collect rate limiting key from request: %v", err)
-		return
-	}
+func (h *httpRateLimiterHandler) RateLimitingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(res http.ResponseWriter, req *http.Request) {
+		key, err := h.config.Extractor.Extract(req)
+		if err != nil {
+			h.writeResponse(res, http.StatusBadRequest, "failed to collect rate limiting key from request: %v", err)
+			return
+		}
 
-	result, err := h.config.Strategy.Run(request.Context(), &Request{
-		Key:      key,
-		Limit:    h.config.MaxRequests,
-		Duration: h.config.Expiration,
+		result, err := h.config.Strategy.Run(req.Context(), &Request{
+			Key:      key,
+			Limit:    h.config.MaxRequests,
+			Duration: h.config.Expiration,
+		})
+
+		if err != nil {
+			h.writeResponse(res, http.StatusInternalServerError, "failed to run rate limiting for request: %v", err)
+			return
+		}
+
+		// set the rate limiting headers both on allor or deny results so the client knows what is going on
+		res.Header().Set(rateLimitingTotalRequests, strconv.FormatUint(result.TotalRequests, 10))
+		res.Header().Set(rateLimitingState, stateStrings[result.State])
+		res.Header().Set(rateLimitingExpiresAt, result.ExpiresAt.Format(time.RFC3339))
+
+		// when the state is `Deny`, just return a 429 response to the client and stop the request handling flow.
+		if result.State == Deny {
+			h.writeResponse(res, http.StatusTooManyRequests, "you have sent too many requests to this service, slow down please :)")
+			return
+		}
+
+		// If the request was not denied we assume it was allowed and call the wrapped handler.
+		// By leaving this to the end we make sure the wrapped handler is only called once and doesn't have to worry
+		// about any rate limiting at all (it doesn't even have to know there was rate limiting happening for this request)
+		// as we have already set the headers, so when the handler flushes the response the headers above will be sent.
+		next.ServeHTTP(res, req)
 	})
 
-	if err != nil {
-		h.writeResponse(writer, http.StatusInternalServerError, "failed to run rate limiting for request: %v", err)
-		return
-	}
-
-	// set the rate limiting headers both on allor or deny results so the client knows what is going on
-	writer.Header().Set(rateLimitingTotalRequests, strconv.FormatUint(result.TotalRequests, 10))
-	writer.Header().Set(rateLimitingState, stateStrings[result.State])
-	writer.Header().Set(rateLimitingExpiresAt, result.ExpiresAt.Format(time.RFC3339))
-
-	// when the state is `Deny`, just return a 429 response to the client and stop the request handling flow.
-	if result.State == Deny {
-		h.writeResponse(writer, http.StatusTooManyRequests, "you have sent too many requests to this service, slow down please :)")
-		return
-	}
-
-	// If the request was not denied we assume it was allowed and call the wrapped handler.
-	// By leaving this to the end we make sure the wrapped handler is only called once and doesn't have to worry
-	// about any rate limiting at all (it doesn't even have to know there was rate limiting happening for this request)
-	// as we have already set the headers, so when the handler flushes the response the headers above will be sent.
-	h.handler.ServeHTTP(writer, request)
 }
