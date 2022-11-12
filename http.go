@@ -76,6 +76,13 @@ type httpRateLimiterHandler struct {
 // sending the request to the wrapped handler. If any errors happen while trying to rate limit a request
 // or if the request is denied, the rate limiting handler will send a response to the client and will not
 // call the wrapped handler.
+func NewHTTPRateLimiterHandler(originalHandler http.Handler, config *RateLimiterConfig) http.Handler {
+	return &httpRateLimiterHandler{
+		handler: originalHandler,
+		config:  config,
+	}
+}
+
 func (h *httpRateLimiterHandler) writeResponse(writer http.ResponseWriter, status int, msg string, args ...interface{}) {
 	writer.Header().Set("Content-Type", "text/plain")
 	writer.WriteHeader(status)
