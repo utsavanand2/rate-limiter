@@ -21,11 +21,11 @@ const (
 )
 
 type counterStrategy struct {
-	client *redis.Client
+	client *redis.ClusterClient
 	now    func() time.Time
 }
 
-func NewCounterStrategy(client *redis.Client, now func() time.Time) *counterStrategy {
+func NewCounterStrategy(client *redis.ClusterClient, now func() time.Time) *counterStrategy {
 	return &counterStrategy{
 		client: client,
 		now:    now,
